@@ -1,2 +1,2 @@
-# Rise
+# Carrier Aggregation
 LTE-A Research
