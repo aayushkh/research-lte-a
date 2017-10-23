@@ -1,0 +1,528 @@
+Code for carrier aggregation
+
+numsubframes = 10;                                                         
+ndlrb = [50 100];                                                          
+num_CC = length(ndlrb);                                                    
+enb = cell(1, num_CC);                                                     
+                                                                           
+for i = 1:num_CC                                                           
+   enb{i} = lteRMCDL('R.5');                                               
+   enb{i}.NDLRB = ndlrb(i);                                                
+   enb{i}.bandwidth = hNRBToBandwidth(ndlrb(i));                           
+   enb{i}.TotSubframes = numsubframes;                                     
+   enb{i}.NCellID = 10;                                                    
+   enb{i}.PDSCH.PRBSet = (0:enb{i}.NDLRB-1).';                             
+end                                                                        
+Delta_f1 = 0.015; %MHz subcarrier spacing                                  
+                                                                           
+if (num_CC > 1)                                                            
+   freq_center = zeros(1,num_CC);                                          
+   guard_band = zeros(1,num_CC-1);                                         
+   freq_offset = zeros(1,num_CC);                                          
+   freq_edge = zeros(1,num_CC);                                            
+   spacing = zeros(1,num_CC-1);                                            
+                                                                           
+    freq_center(1) =0; % set the center frequency of the first component  carrier to 0 MHz
+    fprintf('Center frequency of lower carrier = %1.4f MHz \n',freq_center(1));                                                                                    
+    for i= 1:2                                                             
+                             
+        for k = 2:num_CC                                                   
+            if(i==1)                                                       
+            %calculation of guard band                                     
+                guard_band(k-1) = 0.05*max(enb{k}.bandwidth,enb{k-1}.bandwidth);
+                fprintf('Guard band = %0.4f \n',guard_band(k-1));          
+                                                                           
+            %calculation of offset frequency                               
+                freq_offset(k-1) = (0.18*ndlrb(k-1)/2) + guard_band(k-1);  
+                fprintf('Offset frequency = %3.4f \n',freq_offset(k-1));   
+            end                                                            
+            %calculation of lower edge frequency                           
+                freq_edge(k-1) = freq_center(k-1) - freq_offset(k-1);      
+                fprintf('Lower edge frequency = %3.4f \n',freq_edge(k-1)); 
+                                                                           
+            %calculation of subcarrier spacing;                            
+            if (i==1)                                                      
+                spacing = carrier_spacing(enb{k-1}.bandwidth,enb{k}.bandwidth);                          
+                fprintf('Spacing between adjacent component carriers = %3.4f MHz \n',spacing);
+            end                                                            
+                                                                           
+            %calculation of second subcarrier center frequency             
+            freq_center(k) = freq_center(k-1) + spacing ;                  
+            fprintf('Center frequency of higher carrier = %3.4f MHz \n',freq_center(k));
+                                                                           
+            %calculation of second subcarrier offset frequency             
+            freq_offset(k) = (0.18*ndlrb(k))/2 + guard_band(k-1);          
+            fprintf('Offset frequency of second component carrier = %3.4f MHz \n',freq_offset(k));
+                                                                           
+            %calculation of higher edge frequency                          
+            if(i==1)                                                       
+                freq_edge(k) = freq_center(k) + freq_offset(k);
+                fprintf('Higher edge frequency = %3.4f MHz \n',freq_edge(k));
+            end        
+        end    
+    %calculation of aggregated channel bandwidth
+    if (i==1)
+        CA_bandwidth = freq_edge(num_CC) - freq_edge(1);
+        fprintf('Aggregated channel bandwidth = %1.4f \n',CA_bandwidth);
+    %   shift = 6;
+    %   fprintf('The baseband frequency is shifted to new frequency = %3.4f MHz \n',shift);
+    %   freq_center(1) = freq_center(1) + shift;
+    end
+    end
+ 
+    for i=1:num_CC
+        fprintf('Component Carrier %1d details',i);
+        fprintf('\t Lower edge frequency = %3.4f MHz \n', freq_center(i)-freq_offset(i)+guard_band);
+        fprintf('\t Upper edge frequency = %3.4f MHz \n', freq_center(i)+freq_offset(i)-guard_band);
+    end
+    
+else
+    CA_bandwidth = enb{1}.bandwidth;
+    fprintf('Aggregated Channel Bandwidth = %3.4f MHz \n', CA_bandwidth);
+    freq_center = 0; % in MHz
+    fprintf('Center frequency of carrier = %3.4f MHz \n', freq_center);
+end
+% bandwidth utilization
+bw_fraction = 0.85; % 85 percent of total bandwidth
+ 
+%calculate the sampling rates of the component carriers
+ccsr = zeros(1,num_CC);
+for i = 1:num_CC
+   info = lteOFDMInfo(enb{i});
+   ccsr(i) = info.SamplingRate;
+end
+ 
+%Calculation of overall sampling rate of the aggregated bandwidth
+osr = 2^ceil( log2(CA_bandwidth/bw_fraction)/ (max(ccsr)/1e6) );
+sr = osr*max(ccsr);
+fprintf('\nOutput sample rate = %0.4f Ms/s', sr);
+ 
+%Calculate individual oversampling factors for component carriers
+osrs = sr./ccsr;
+ 
+tx = cell(1,num_CC);
+for i=1:num_CC
+   tx{i} = lteRMCDLTool(enb{i},randi([0 1],1000,1));
+   tx{i} = resample(tx{i},osrs(i),1)/osrs(i);
+   tx{i} = hCarrierAggregationModulate(tx{i},sr,freq_center(i)*1e6);
+end
+waveform = tx{1};
+for i=2:num_CC
+   waveform = waveform + tx{i}; 
+end
+ 
+for i = 1:num_CC
+    figure(i);
+    hCarrierAggregationPlotFFT(tx{i}, sr,'Power spectrum of Carrier Aggregation');
+end
+figure(i+1);
+hCarrierAggregationPlotFFT(waveform, sr,'Power spectrum of Carrier Aggregation');
+
+code for carrier spacing
+
+function [spacing] = carrier_spacing(first_bandwidth, second_bandwidth)
+% calculation of nomical channel spacing only for intra band contiguous carrier aggregation
+spacing = ((first_bandwidth+second_bandwidth - 0.1*abs(first_bandwidth-second_bandwidth))/0.6) * 0.3 ; %MHz
+end
+
+code for plotting aggregated carriers
+
+%hCarrierAggregationPlotFFT Plot FFT of waveform
+%   hCarrierAggregationPlotFFT(TX,SR,TITLESTR) plots the FFT of a
+%   transmitted waveform TX at sampling rate SR with the title TITLESTR.
+ 
+%   Copyright 2011-2014 The MathWorks, Inc.
+ 
+function hCarrierAggregationPlotFFT(tx,sr,titlestr)
+ 
+    Nfft = sr/30.72e6*2048;             % Required FFT size
+    x = (-Nfft/2:1:(Nfft/2-1))/Nfft*sr; % Frequency range to plot over
+    numFFTs = fix(size(tx, 1)/Nfft);    % Number of FFTs required 
+    
+    % Extract a portion of the input signal, perform the FFT and combine
+    % with previous conversions
+    fftout = zeros(Nfft, size(tx, 2));  
+    for i = 0:numFFTs-1;
+        fftin = tx(i*Nfft+(1:Nfft), :);
+        fftout = fftout+fftshift(abs(fft(fftin, Nfft)).^2);
+    end
+    fftout = fftout/numFFTs;
+    
+    % Plot transform
+    plot(x/1e6, 10*log10(fftout));
+    ylabel('Power (dB)');
+    xlabel('Frequency (MHz)');
+    title(titlestr);
+    
+end
+
+Code for LTE frame structure
+
+clc;                                                     
+clear all;                                               
+enb = lteTestModel('1.1','1.4MHz');                      
+[txwave,txgrid,info] = lteTestModelTool(enb);            
+figure('Color','w');                                     
+helperPlotTransmitResourceGrid(enb,txgrid);              
+channel.ModelType = 'GMEDS';                             
+channel.DelayProfile = 'EVA';                            
+channel.DopplerFreq = 70;                                
+channel.MIMOCorrelation = 'High';                        
+channel.NRxAnts = 1;                                     
+channel.InitTime = 0;                                    
+channel.InitPhase = 'Random';                            
+channel.Seed = 17;                                       
+channel.NormalizePathGains = 'On';                       
+channel.NormalizeTxAnts = 'On';                          
+channel.SamplingRate = info.SamplingRate;                
+channel.NTerms = 16;                                     
+rxwave = lteFadingChannel(channel,[txwave;zeros(25,1)]); 
+figure('Color','w');                                     
+helperPlotReceiveWaveform(info,rxwave);                  
+offset = lteDLFrameOffset(enb,rxwave);                   
+rxwave = rxwave(offset:end,:);                           
+rxgrid = lteOFDMDemodulate(enb,rxwave);                  
+figure('Color','w');                                     
+helperPlotReceiveResourceGrid(enb,rxgrid);               
+cec.PilotAverage = 'UserDefined';                        
+cec.FreqWindow = 9;                                      
+cec.TimeWindow = 9;                                      
+cec.InterpType = 'Cubic';                                
+cec.InterpWindow = 'Centered';                           
+cec.InterpWinSize = 3;                                   
+[hest,nest] = lteDLChannelEstimate(enb,cec,rxgrid);      
+figure('Color','w');                                     
+helperPlotChannelEstimate(hest);                         
+[out,csi] = lteEqualizeMMSE(rxgrid,hest,nest);           
+figure('Color','w');                                     
+helperPlotEqualizedResourceGrid(enb,out);  
+ 
+[eqhest,eqnest] = lteDLChannelEstimate(enb,cec,out);      
+figure('Color','w'); 
+helperPlotChannelEstimate(eqhest);
+
+
+Code for femto cell simulation
+
+clc;
+clear all;
+HeNB_Num = 4;
+FUE_Num_eachFemto=1;
+Throughput5_total1=0;
+%Throughput3_total1=0;
+ 
+%for k = 4:4:16
+%    for j=1:FUE_Num_eachFemto
+        for i=1:HeNB_Num/4
+            x=rand(1)*10;
+            y=rand(1)*10;
+            FAP(i).location_x=x;
+            FAP(i).location_y=y+(i-1)*10;
+            FAP(i).FUE(1).location_x=rand(1)*10;
+            FAP(i).FUE(1).location_y=rand(1)*10+(i-1)*10;
+        end
+        for i=(HeNB_Num/4+1):HeNB_Num/2;
+            x=rand(1)*10;
+            y=rand(1)*10;
+            FAP(i).location_x=x+10;
+            FAP(i).location_y=y+(i-1-HeNB_Num/4)*10;
+            FAP(i).FUE(1).location_x=rand(1)*10+10;
+            FAP(i).FUE(1).location_y=rand(1)*10+(i-1-HeNB_Num/4)*10;
+        end
+        for i=(HeNB_Num/2+1):(HeNB_Num/2+HeNB_Num/4)
+            x=rand(1)*10;
+            y=rand(1)*10;
+            FAP(i).location_x=x+20;
+            FAP(i).location_y=y+(i-1-HeNB_Num/2)*10;
+            FAP(i).FUE(1).location_x=rand(1)*10+20;
+            FAP(i).FUE(1).location_y=rand(1)*10+(i-1-HeNB_Num/2)*10;
+        end 
+        for i=(HeNB_Num/2+HeNB_Num/4+1):HeNB_Num
+            x=rand(1)*10;
+            y=rand(1)*10;
+            FAP(i).location_x=x+30;
+            FAP(i).location_y=y+(i-1-HeNB_Num/2-HeNB_Num/4)*10;
+            FAP(i).FUE(1).location_x=rand(1)*10+30;
+            FAP(i).FUE(1).location_y=rand(1)*10+(i-1-HeNB_Num/2-HeNB_Num/4)*10;
+        end
+        
+ %end
+    for i=1:HeNB_Num                                                                                         
+        for j=1:HeNB_Num                                                                                     
+            link.FAP(i).FAP(j).FUE(1).distance = compute_distance(FAP(j),FAP(i).FUE(1));                     
+            link.FAP(i).FAP(j).FUE(1).pathloss = compute_pathloss_interf(link.FAP(i).FAP(j).FUE(1).distance);
+                                                                                                             
+        end                                                                                                  
+    end                                                                                                      
+     
+    SIR_FAP = zeros(HeNB_Num,1);
+    Throughput5_FAP = zeros(HeNB_Num,1);
+  %  Throughput3_FAP = zeros(HeNB_Num,1);
+    Interference_FAP = zeros(HeNB_Num,1);
+    
+    for i=1:HeNB_Num
+        for j=1:HeNB_Num 
+            Interference_FAP(i) = Interference_FAP(i) + link.FAP(i).FAP(j).FUE(1).pathloss;
+        end
+    end   
+ 
+    for i=1:HeNB_Num
+            SIR_FAP(i) = link.FAP(i).FAP(i).FUE(1).pathloss./Interference_FAP(i);
+            Throughput5_FAP(i)=14000000*log10(1+SIR_FAP(i));
+    %        Throughput3_FAP(i)=60*log10(1+SIR_FAP(i));
+            Throughput5_total1 = Throughput5_total1+Throughput5_FAP(i);
+     %   Throughput3_total1 = Throughput3_total1+Throughput3_FAP(i);
+  %  Throughput5_total(k)=Throughput5_total1;
+  %  Throughput3_total(HeNB_Num/4)=Throughput3_total1;
+   
+  %  DLT(i) = (((Throughput5_total1+Throughput5_FAP(i))-(Throughput3_total1+Throughput3_FAP(i)))./(Throughput3_total1+Throughput3_FAP(i)))*100;
+    end
+%{
+    t=1:0.1:500;
+    for i=1:4
+    plot(t,Throughput5_FAP(i)/Throughput5_total1);
+    hold on;
+    xlabel('Number of Activated HeNBs');
+    ylabel('Throughput');
+    title('Average number of CC used per HeNB');
+    end
+%}
+
+ 
+Code for calculating the pathloss
+
+function [pathloss] = compute_pathloss_interf(distance)
+pathloss = (20*log10(900)) + (33*log10(distance)) + 9 -28;
+%pathloss = 10.^(pathloss1./10);
+
+Code for calculating the distance
+
+function [distance] = compute_distance(BaseStation, UE)
+distance = sqrt((BaseStation.location_x-UE.location_x)^2 + (BaseStation.location_y-UE.location_y)^2);
+
+Code for pico cell and macro cell simulation
+
+%%Pico cell and macro cell simulation
+ 
+macro.coverage_radius = 1500; % in meters
+macro.dl_strength = 20; % in watts
+fig = 0;
+update = 0;
+num_UEs = 5;
+range_ue_x = 2000; % in meters
+range_ue_y = 2000; % in meters
+%%
+%allocating location to macro
+coverage_boundary_macro = 2*pi*1500;
+macro.location.x = 2500;
+macro.location.y = 2500;
+%%
+%allocating location to pico cells
+x_pico = 2500;
+y_pico = 2500;
+pico(1).location.x = x_pico-300; % x coordinate of first pico cell
+pico(1).location.y = y_pico;     % y coordinate of first pico cell
+pico(2).location.x = x_pico;     % x coordinate of second pico cell
+pico(2).location.y = y_pico+300; % y coordinate of second pico cell
+pico(3).location.x = x_pico+300; % x coordinate of third pico cell
+pico(3).location.y = y_pico;     % y coordinate of third pico cell
+pico(4).location.x = x_pico;     % x coordinate of forth pico cell
+pico(4).location.y = y_pico-300; % y coordinate of forth pico cell
+%% Assigning downlink coverage strength and radius
+for i = 1:num_UEs-1
+   pico(i).coverage = 0.1*i; % in watts 
+   pico(i).coverage_radius = 200; % in meters
+end
+%% There are 5 UEs, first UE will be served by macro cell and other 4 UEs will be served by theie respective pico cells allocated to them
+%allocating location to UEs
+x_ue = x_pico - 200;
+y_ue = y_pico - 150;
+ue(1).location.x = x_ue; % x coordinate of first UE
+ue(1).location.y = y_ue; % y coordinate of first UE
+for i = 2:1:num_UEs
+    ue(i).location.x = pico(i-1).location.x-200 + (i*10) ; % x coordinate of UE
+    ue(i).location.y = pico(i-1).location.y-150 + (i*10) ; % y coordinate of UE
+end
+c = clock;
+%% Assigning speeds to UEs
+for i = 1:num_UEs
+    ue(i).speed = 0.5*i; % in m/s
+end
+ 
+%% computing the distance between the UE and base stations
+ue(1).distance = compute_distance(macro.location.x , ue(1).location.x , macro.location.y , ue(1).location.y);
+for i = 2:1:num_UEs                             
+    ue(i).distance = compute_distance(pico(i-1).location.x , ue(i).location.x , pico(i-1).location.y , ue(i).location.y);
+end   
+%% computing pathloss using indoor & outdoor models
+%for pathloss between UE and Macro cell
+                                                  
+fig = fig+1;
+ue(1).pathloss = hata_model(ue(1).distance,fig);       
+for i = 2:num_UEs                                  
+    fig = fig + 1;                                           
+    ue(i).pathloss = indoor_pathloss_model(ue(i).distance,fig); 
+    fprintf('UE %d is served by pico cell %d \n',i,i-1);
+end     
+ 
+%% Calculating the throughput by considering that the bandwidth is 1.4MHz
+ 
+for i = 1:num_UEs
+    for j = 1:num_UEs
+        ue(i).distance_from_each_UE(j) = 0;
+    end
+end
+ 
+% calculation of distance between UE1 and all the base station
+ue(1).distance_from_each_UE(1) = compute_distance(macro.location.x , ue(1).location.x , macro.location.y , ue(1).location.y);
+ue(1).pathloss_due_to_each_link(1) = compute_hata_model(ue(1).distance_from_each_UE(1));
+for i = 1:num_UEs-1
+    ue(1).distance_from_each_UE(i+1) = compute_distance(pico(i).location.x , ue(1).location.x , pico(i).location.y , ue(1).location.y);
+    ue(1).pathloss_due_to_each_link(i+1) = compute_hata_model(ue(1).distance_from_each_UE(i+1));
+end
+ 
+%calculation of distance between other UEs and all other base stations
+for i = 2:num_UEs  % be careful loop starts from 2nd pico cell since 1st pico cell's paramters is already defined.
+    ue(i).distance_from_each_UE(1) = compute_distance(macro.location.x , ue(i).location.x , macro.location.y , ue(i).location.y);
+    ue(i).pathloss_due_to_each_link(1) = compute_indoor_pathloss_model(ue(i).distance_from_each_UE(1));
+    for j = 2:num_UEs
+        ue(i).distance_from_each_UE(j) = compute_distance(pico(j-1).location.x , ue(i).location.x , pico(j-1).location.y , ue(i).location.y);
+        ue(i).pathloss_due_to_each_link(j) = compute_indoor_pathloss_model(ue(i).distance_from_each_UE(j));
+    end
+end
+ 
+%calculation of signal to interference ratio (SIR)
+ 
+for i = 1:num_UEs
+    ue(i).interference = 0;
+    for j = 1:num_UEs
+        ue(i).interference = ue(i).interference + ue(i).pathloss_due_to_each_link(j);
+    end
+    ue(i).sir = ue(i).pathloss/ue(i).interference; % to get throughput graph, type ue(i).pathloss, otherwise to get single value type ue(i).pathloss_due_to_each_link
+    ue(i).throughput = 1400000 * log10(1+ue(i).sir); % Bandwidth = 1.4MHz
+end
+ 
+figure(3);
+subplot(2,3,1);
+plot(ue(1).sir,ue(1).throughput);
+xlabel('signal to interference ratio(dB)');
+ylabel('Throughput (Mbps)');
+str = ['UE',num2str(1)];
+text(0.236,1.13e5,str);
+for i = 2:num_UEs
+    subplot(2,3,i);
+    plot(ue(i).sir,ue(i).throughput);
+    xlabel('signal to interference ratio(dB)');
+    ylabel('Throughput (Mbps)');
+    str = ['UE',num2str(i)];
+    text(0.156,3e4,str);
+ 
+end
+ 
+%% find the least pathloss for every UE1 on each link and hand over the UE to that particular base station
+small = ue(1).pathloss;
+for j = 1:num_UEs
+      if (small > ue(1).pathloss_due_to_each_link(j))
+             small = ue(1).pathloss_due_to_each_link(j);
+             k = j;
+      end
+end       
+             if (small~=ue(1).pathloss)
+                 fprintf('UE1 will be handed over to pico cell%d \n',k);
+             end
+             
+% calculation of smallest pathloss for UEs 2,3,4,5
+for i = 2:num_UEs
+    small = ue(i).pathloss;
+    for j = 1:num_UEs
+        if (small > ue(i).pathloss_due_to_each_link(j))
+             small = ue(i).pathloss_due_to_each_link(j);
+             k = j;
+        end
+    end    
+    if (small~=ue(i).pathloss)
+    fprintf('UE%d will be handed over to pico cell%d \n',i,k);
+    end
+end
+ 
+%% Update the location of all UEs
+d = clock;
+for i = 1:num_UEs
+    disp('Old distance');
+    disp(ue(i).distance);
+end
+ 
+for i=1:num_UEs
+   min_2_sec = 0;
+   if ( d(6)>c(6) ) 
+        min_2_sec = (d(5)-c(5))*60;
+   end 
+   time = min_2_sec + ( d(6) - c(6) );
+   ue(i).distance = ue(i).distance + (ue(i).speed * time) ;
+   disp('new distance');
+   disp(ue(i).distance);
+end
+
+Code for calculation of distance
+
+function distance = compute_distance(base_station_x ,ue_x ,base_station_y ,ue_y)
+distance = sqrt((base_station_x-ue_x)^2+(base_station_y-ue_y)^2);
+
+Code for calculation of pathloss using hata model
+
+% Hata model for calculating pathloss
+function [pathloss] = hata_model(d)
+ 
+ht_base = 47; % in meters
+ht_ue   = 0.55; % in meters
+operating_frequency = 900; %in MHz
+                                                    
+% for operating frequency less than 300MHz and for small to medium sized cities
+% a.ht_ue =(((1.1*log10(operating_frequency))-0.7)*ht_ue)-((1.56*log10(operating_frequency))-0.8; %dB
+a.ht_ue = (3.2*(log10(11.75*ht_ue))^2) - 4.97; % in decibels(dB) for urban cities, for operating frequency >300MHz
+ 
+%for i=1:length(d)
+    pathloss = (69.55 + (26.16 * log10(operating_frequency)) - (13.82 * log10(ht_base)) - a.ht_ue + (44.9 -(6.55 * log10(ht_base))*log10(d))); % in decibels(dB)  
+
+Code for calculation of pathloss using indoor pathloss model
+
+%COST 231 model for calculating pathloss
+function [pathloss] = cost231_model(d)
+ 
+a.ht_base = 47; % in meters
+a.ht_ue   = 0.55; % in meters
+constant = 0; % in decibels dB for medium sized cities and suburbs
+%constant = 3; % in decibels dB for metropolitan cities
+%operating frequency sould range from 1.5 GHz to 2 GHz
+operating_frequency = 2.5; %in GHz 
+%distance should range from 1km to 20km
+%%
+% if(d>1000 & d<2000)
+    pathloss = 46.3 + (33.9 * log10(operating_frequency)) - (13.82 * log10(a.ht_base)) - a.ht_ue + (44.9 -(6.55 * log10(a.ht_base))*log10(d)) + constant; % in decibels(dB)
+    plot(d,pathloss,'g');
+    legend('Hata model','Cost 231  model');
+    hold off;
+    %figure(f);    
+ end
+
+Code for calculation of pathloss using cost 231 model
+
+%COST 231 model for calculating pathloss
+function [pathloss] = cost231_model(d)
+ 
+a.ht_base = 47; % in meters
+a.ht_ue   = 0.55; % in meters
+constant = 0; % in decibels dB for medium sized cities and suburbs
+%constant = 3; % in decibels dB for metropolitan cities
+%operating frequency sould range from 1.5 GHz to 2 GHz
+operating_frequency = 2.5; %in GHz 
+%distance should range from 1km to 20km
+%%
+% if(d>1000 & d<2000)
+    pathloss = 46.3 + (33.9 * log10(operating_frequency)) - (13.82 * log10(a.ht_base)) - a.ht_ue + (44.9 -(6.55 * log10(a.ht_base))*log10(d)) + constant; % in decibels(dB)
+    plot(d,pathloss,'g');
+    legend('Hata model','Cost 231  model');
+    hold off;
+    %figure(f);    
+ end
+
